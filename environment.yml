@@ -1,0 +1,13 @@
+dependencies:
+  - cudatoolkit
+  - numpy
+  - pytorch
+  - scikit-learn
+  - loguru
+  - botorch
+  - pandas
+  - jinja2
+  - scipy
+  - plotly
+  - matplotlib
+  - ipython

@@ -1,0 +1,12 @@
+{
+  "Simple linear model": {
+    "pathToModelPythonFile": "LinearInTPython/LinearInTPythonModel.py",
+    "modelName": "Simple linear model",
+    "modelId": "LinearInTPythonModel"
+  },
+  "Simplified equilibrium with freeze-in temperature": {
+    "pathToModelPythonFile": "FreezeInEquilibriumPython/FreezeInEquilibriumPythonModel.py",
+    "modelName": "Simplified equilibrium with freeze-in temperature",
+    "modelId": "FreezeInEquilibriumPythonModel"
+  }
+}
