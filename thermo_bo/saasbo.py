@@ -6,9 +6,10 @@ SAASBO class.
 
 import contextlib
 import sys
-from typing import Dict, List, Literal, NamedTuple, Tuple
+from typing import Dict, List, Literal, NamedTuple, Tuple, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from botorch.acquisition import qExpectedImprovement, qNoisyExpectedImprovement
 from botorch.acquisition.multi_objective import (
@@ -27,7 +28,7 @@ from sklearn.preprocessing import StandardScaler
 from torch import Tensor
 
 from .data import DataParameters, get_data
-from .models import ExactGPModel, TorchGP, SaasGP
+from .models import ExactGPModel, SaasGP, TorchGP
 
 
 class ThermoCalcFile(object):
@@ -51,23 +52,29 @@ class SAASBOParameters(NamedTuple):
     :param project_name: name of the project
     :param targets: target properties to optimize
     :param targets_mask: boolean to inidicate target to be maximized (True) or minimized (False)
+    :param active_features: features to be optimized
+    :param desired_f: desired function value
     :param device: which device to use (cpu or gpu)
     :param n_iter: number of iterations to perform
     :param cand_size: number of candidates to acquire in each iteration
     :param exact_gp_n_iter: number of iterations for exact gp optimization
+    :param one_d_only: one d only algorithm
     """
-    gp: Literal["exact", "torch"]
+    gp: Literal["exact", "torch", "saas"]
     acq_startegy: Literal["q", "q_noisy"]
     sampler: Literal["iid", "sobol"]
     partitioning: Literal["dominated", "non-dominated"]
     seed_points: int
-    project_name: str
+    project_name: Literal["computational", "experimental"]
     targets: List[str]
     targets_mask: List[bool]
-    device: str
+    active_features: Optional[List[str]] = None
+    desired_f: Optional[List[float]] = None
+    device: Literal["cpu", "cuda"] = "cpu"
     n_iter: int = 10
     cand_size: int = 4
     exact_gp_n_iter: int = 1000
+    one_d_only: bool = False
     
     
 class SAASBO:
@@ -97,9 +104,21 @@ class SAASBO:
             raise ValueError("gp not recognized. Only torch and exact are allowed.")
         self.df, self.features = get_data(DataParameters(self._inputs.project_name, 
             self._inputs.targets))
+        if self._inputs.active_features:
+            columns = [i for i in self.df.columns if i not in self.features] 
+            columns += self._inputs.active_features
+            self.df = self.df[columns]
+            self.features = self._inputs.active_features
         for target in self._inputs.targets:
             self.df[f"saasbo_{target}"] = np.nan
         self.acquire_seed_points()
+        
+        self.desired_f = []
+        for target, mask in zip(self._inputs.targets, self._inputs.targets_mask):
+            self.desired_f.append(self.df[target].max() if mask else self.df[target].min())
+        if self._inputs.desired_f:
+            self.desired_f = [min(gf, df) if mask else max(gf, df) 
+                for gf, df, mask in zip(self.desired_f, self._inputs.desired_f, self._inputs.targets_mask)]
     
     def acquire_seed_points(self) -> None:
         """
@@ -172,12 +191,11 @@ class SAASBO:
         else:
             raise ValueError("sampler strategy not recognized. Only iid and sobor are allowed.")
         
-        if Y.shape[-1] == 1:
+        if self._inputs.one_d_only:
             with torch.no_grad():
-                pred = gp.posterior(X).mean
+                pred = gp.posterior(X).variance 
             weights = sample_simplex(1).view(-1)
-            objective = GenericMCObjective(get_chebyshev_scalarization(weights,
-                pred))
+            objective = GenericMCObjective(get_chebyshev_scalarization(weights, pred))
             if self._inputs.acq_startegy == "q":
                 acq_fun = qExpectedImprovement(model=gp, objective=objective,
                     sampler=sampler, best_f=max(Y) if self._inputs.targets_mask[0] else max(-Y))
@@ -193,7 +211,8 @@ class SAASBO:
                 reference_points[i] = reference_points[i] if self._inputs.targets_mask[i] else -reference_points[i]
                 Y_train[:, i] = Y_train[:, i] if self._inputs.targets_mask[i] else -Y_train[:, i]
             if self._inputs.partitioning == "dominated":
-                partitioning = DominatedPartitioning(ref_point=reference_points, Y=Y_train)
+                #partitioning = DominatedPartitioning(ref_point=reference_points, Y=Y_train)
+                raise NotImplementedError("It's not implemented yet.")
             elif self._inputs.partitioning == "non-dominated":
                 partitioning = NondominatedPartitioning(ref_point=reference_points, Y=Y_train)
             else:
@@ -201,7 +220,7 @@ class SAASBO:
             if self._inputs.acq_startegy == "q":
                 acq_fun = qExpectedHypervolumeImprovement(model=gp, sampler=sampler,
                     ref_point=reference_points, partitioning=partitioning)
-            elif self._inputs.acq_startegy == "q_noisy":
+            elif self._inputs.acq_startegy == "qnoisy":
                 acq_fun = qNoisyExpectedHypervolumeImprovement(model=gp, sampler=sampler,
                     ref_point=reference_points, partitioning=partitioning, incremental_nehvi=True, 
                     X_baseline=X, prune_baseline=False,)
@@ -224,14 +243,20 @@ class SAASBO:
             X, Y, X_test = self.get_train_test_data()
             candidates, _ = self.generate_next_candidates(X, Y, X_test)
             logger.info(f"Collenting candidates property...")
+            logger.info(f"candidates found: ")
             for cand in candidates:
-                idx = self.get_iloc(dict(zip(self.features, cand)))
+                temp_dict = dict(zip(self.features, cand.tolist()))
+                logger.info(temp_dict)
+                idx = self.get_iloc(temp_dict)
                 for target in self._inputs.targets:
                     logger.info(f"Collected candidate property: {self.df.at[idx, target]}")
                     self.df.at[idx, f"saasbo_{target}"] = self.df.at[idx, target]
-            logger.info("Best see so far:")
-            for target, mask in zip(self._inputs.targets, self._inputs.targets_mask):
-                global_f = self.df[target].max() if mask else self.df[target].min()
-                best_f = self.df[f"saasbo_{target}"].max() if mask else self.df[f"saasbo_{target}"].min()
-                logger.info(f"{target}: {best_f} {global_f}")
+            logger.info("Best seen so far:")
+            best_f = []
+            for target, mask, des_f in zip(self._inputs.targets, self._inputs.targets_mask, self.desired_f):
+                best_f.append(self.df[f"saasbo_{target}"].max() if mask else self.df[f"saasbo_{target}"].min())
+                logger.info(f"{target}: {best_f[-1]} {des_f}")
+            if all(b_f >= d_f if mask else b_f <= d_f for d_f, b_f, mask in zip(self.desired_f, best_f, self._inputs.targets_mask)):
+                logger.info("Reached the desired function value! Terminating simulation.")
+                break
         

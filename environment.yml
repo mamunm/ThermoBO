@@ -4,7 +4,7 @@ dependencies:
   - pytorch
   - scikit-learn
   - loguru
-  - botorch
+  - botorch=0.7.2
   - pandas
   - jinja2
   - scipy
